@@ -154,25 +154,37 @@ fn main() {
         println!("Labelling {} commits", note_map.len());
     }
 
-    // 4. Attach notes
-    for (count, (id, mut notes)) in note_map.into_iter().enumerate() {
-        if count > 0 && count % 5000 == 0 {
-            println!("{}..", count);
-        }
-
+    // 4. Build note commit
+    let mut note_tree = repo.treebuilder(None).expect("getting a treebuilder");
+    for (id, notes) in &mut note_map {
         let mut msg = String::new();
         notes.sort_by_key(|note| (note.url_prefix, note.pr_num));
-        for note in &notes {
+
+        for note in notes {
             msg.push_str(&format!("PR: {}{} ({}/{})\n", note.url_prefix, note.pr_num, note.commit_index, note.n_commits));
         }
-        if let Ok(existing) = repo.find_note(Some("refs/notes/label-pr"), id) {
-            if existing.message() == Some(&msg) {
-                continue; // done already
-            }
-        }
-        let sig = Signature::now("PR Labeller", "prlabel@wpsoftware.net").expect("create sig");
-        repo.note(&sig, &sig, Some("refs/notes/label-pr"), id, &msg, true).expect("adding note");
+        let blob_id = repo.blob(msg.as_bytes()).expect("writing note blob");
+        note_tree.insert(id.to_string(), blob_id, 33188).expect("putting note blob in tree");
     }
-    println!("Done");
+    let note_tree_id = note_tree.write().expect("writing new note tree");
+    let note_tree = repo.find_tree(note_tree_id).expect("reading tree we just wrote");
+
+    // 5. Put notes into repo
+    let mut parents = vec![];
+    if let Ok(existing) = repo.find_reference("refs/notes/label-pr") {
+        parents.push(existing.peel_to_commit().expect("existing ref points to commit"));
+    }
+    let parents_refs: Vec<&_> = parents.iter().collect(); // we need a slice of references for `commit()`
+    let sig = Signature::now("PR Labeller", "prlabel@wpsoftware.net").expect("create sig");
+    let comm_id = repo.commit(
+        Some("refs/notes/label-pr"),
+        &sig,
+        &sig,
+        "Notes added by label-pr utility",
+        &note_tree,
+        &parents_refs,
+    ).expect("committing new notes");
+
+    println!("Done. Added new notes as {}", comm_id);
 }
 
