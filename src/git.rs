@@ -33,19 +33,25 @@ pub struct TempWorktree {
 impl TempWorktree {
     /// Creates a new temporary worktree in a given repository
     pub fn new(repo: &Repository, head: Option<&git2::Reference>) -> anyhow::Result<Self> {
-        let new_dir = tempfile::tempdir()
-            .context("creating temporary directory for new worktree")?;
-	let name = format!(
+        let new_dir =
+            tempfile::tempdir().context("creating temporary directory for new worktree")?;
+        let name = format!(
             "checkpr-temp-worktree-{}",
-            new_dir.path().file_name().and_then(|oss| oss.to_str()).unwrap_or(""),
+            new_dir
+                .path()
+                .file_name()
+                .and_then(|oss| oss.to_str())
+                .unwrap_or(""),
         );
         fs::remove_dir(new_dir.path())
             .context("removing temp dir so that git-worktree can recreate it")?;
-        let worktree = repo.worktree(
-            &name,
-            new_dir.path(),
-            Some(git2::WorktreeAddOptions::new().reference(head)),
-        ).with_context(|| format!("creating new worktree {}", name))?;
+        let worktree = repo
+            .worktree(
+                &name,
+                new_dir.path(),
+                Some(git2::WorktreeAddOptions::new().reference(head)),
+            )
+            .with_context(|| format!("creating new worktree {}", name))?;
 
         Ok(TempWorktree {
             worktree: worktree,
@@ -56,7 +62,12 @@ impl TempWorktree {
     /// Attempt to open the worktree as a repository
     pub fn repo(&self) -> anyhow::Result<Repository> {
         Repository::open_from_worktree(&self.worktree)
-            .with_context(|| format!("opening worktree at {} as repo", self.dir.path().to_string_lossy()))
+            .with_context(|| {
+                format!(
+                    "opening worktree at {} as repo",
+                    self.dir.path().to_string_lossy()
+                )
+            })
             .map_err(anyhow::Error::from)
     }
 
@@ -73,7 +84,7 @@ impl Drop for TempWorktree {
     fn drop(&mut self) {
         // prune valid worktree .. it won't be valid soon when we delete it!
         if let Err(e) = self.worktree.prune(Some(
-            &mut git2::WorktreePruneOptions::new().locked(true).valid(true)
+            &mut git2::WorktreePruneOptions::new().locked(true).valid(true),
         )) {
             eprintln!(
                 "WARNING: failed to remove worktree at {}: {}",
@@ -96,8 +107,8 @@ pub struct TempRepo {
 impl TempRepo {
     /// Creates a new temporary repo
     pub fn new() -> anyhow::Result<Self> {
-        let new_repo_dir = tempfile::tempdir()
-            .context("creating temporary directory for new repo")?;
+        let new_repo_dir =
+            tempfile::tempdir().context("creating temporary directory for new repo")?;
         let path_str = new_repo_dir.path().to_string_lossy();
         let new_repo = Repository::init(new_repo_dir.path())
             .with_context(|| format!("initializing temporary repo in {}", path_str))?;
@@ -118,16 +129,20 @@ impl TempRepo {
         copy_tree(source, &self.repo, tree)?;
 
         // Convert to an index to do the checkout
-        let mut index = git2::Index::new()
-            .context("Creating in-memory index")?;
-        index.read_tree(&tree)
+        let mut index = git2::Index::new().context("Creating in-memory index")?;
+        index
+            .read_tree(&tree)
             .with_context(|| format!("reading tree {} into index", tree.id()))?;
 
-        let new_id = index.write_tree_to(&self.repo)
+        let new_id = index
+            .write_tree_to(&self.repo)
             .with_context(|| format!("writing tree {} into index", tree.id()))?;
-        let new_obj = self.repo.find_object(new_id, None)
+        let new_obj = self
+            .repo
+            .find_object(new_id, None)
             .with_context(|| format!("finding object {} that we just created", new_id))?;
-        self.repo.checkout_tree(&new_obj, None)
+        self.repo
+            .checkout_tree(&new_obj, None)
             .with_context(|| format!("checking out {}", new_id))?;
 
         Ok(())
@@ -143,22 +158,25 @@ impl TempRepo {
 }
 
 /// Creates a new temporary repo and copies the specified commit ID into it
-pub fn temp_repo<'src>(
-    source: &'src Repository,
-    commit_id: git2::Oid,
-) -> anyhow::Result<TempRepo> {
+pub fn temp_repo<'src>(source: &'src Repository, commit_id: git2::Oid) -> anyhow::Result<TempRepo> {
     // Create the reop
-    let commit = source.find_commit(commit_id)
+    let commit = source
+        .find_commit(commit_id)
         .with_context(|| format!("finding commit {}", commit_id))?;
-    let tree = commit.tree()
+    let tree = commit
+        .tree()
         .with_context(|| format!("getting tree for {}", commit_id))?;
 
     let new_repo = TempRepo::new()?;
-    new_repo.copy_tree_and_checkout(&tree, source)
+    new_repo
+        .copy_tree_and_checkout(&tree, source)
         .with_context(|| format!("copying commit {}'s tree to {}", commit_id, new_repo.path()))?;
 
-
-    println!("Created new repo in {} with commit {} read into it", new_repo.path(), commit_id);
+    println!(
+        "Created new repo in {} with commit {} read into it",
+        new_repo.path(),
+        commit_id
+    );
     Ok(new_repo)
 }
 
@@ -172,40 +190,35 @@ fn copy_tree<'src, 'dst>(
     let src_odb = source.odb().context("getting odb for source repo")?;
     let dst_odb = dest.odb().context("getting odb for dest repo")?;
 
-    tree.walk(
-        git2::TreeWalkMode::PreOrder,
-        |_, entry| {
-            let obj = match src_odb.read(entry.id()) {
-                Ok(obj) => obj,
-                Err(e) => {
-                    abort_err = Err(e)
-                        .with_context(|| format!("getting object {}", entry.id()));
-                    return git2::TreeWalkResult::Abort;
-                },
-            };
-            let new_id = match dst_odb.write(obj.kind(), obj.data()) {
-                Ok(id) => id,
-                Err(e) => {
-                    abort_err = Err(e)
-                        .with_context(|| format!("writing object {}", entry.id()));
-                    return git2::TreeWalkResult::Abort;
-                },
-            };
-            assert_eq!(new_id, entry.id());
-            git2::TreeWalkResult::Ok
-        }
-    ).with_context(|| format!("walking tree {}", tree.id()))?;
+    tree.walk(git2::TreeWalkMode::PreOrder, |_, entry| {
+        let obj = match src_odb.read(entry.id()) {
+            Ok(obj) => obj,
+            Err(e) => {
+                abort_err = Err(e).with_context(|| format!("getting object {}", entry.id()));
+                return git2::TreeWalkResult::Abort;
+            }
+        };
+        let new_id = match dst_odb.write(obj.kind(), obj.data()) {
+            Ok(id) => id,
+            Err(e) => {
+                abort_err = Err(e).with_context(|| format!("writing object {}", entry.id()));
+                return git2::TreeWalkResult::Abort;
+            }
+        };
+        assert_eq!(new_id, entry.id());
+        git2::TreeWalkResult::Ok
+    })
+    .with_context(|| format!("walking tree {}", tree.id()))?;
     abort_err?;
 
-    // Copy the tree itself 
-    let obj = src_odb.read(tree.id())
+    // Copy the tree itself
+    let obj = src_odb
+        .read(tree.id())
         .with_context(|| format!("reading tree {} as ODB object", tree.id()))?;
-    let new_id = dst_odb.write(obj.kind(), obj.data())
+    let new_id = dst_odb
+        .write(obj.kind(), obj.data())
         .with_context(|| format!("writing tree {} as ODB object", tree.id()))?;
     assert_eq!(new_id, tree.id());
 
-
     Ok(())
 }
-    
-

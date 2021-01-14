@@ -23,21 +23,21 @@ mod pr;
 use std::collections::HashSet;
 
 use anyhow::Context;
-use structopt::StructOpt;
 use git2::Repository;
+use structopt::StructOpt;
 
 use self::pr::PullRequest;
 
 #[derive(StructOpt, Debug)]
 struct Opts {
     /// Repository to read
-    #[structopt(short, long, default_value=".")]
+    #[structopt(short, long, default_value = ".")]
     repo: String,
     /// The tip of the PR to check
     #[structopt(short, long)]
     tip: String,
     /// The "master" branch the PR was forked from
-    #[structopt(short, long, default_value="master")]
+    #[structopt(short, long, default_value = "master")]
     master: String,
     /// Whether to accept PRs that have merge commits in them. We cannot
     /// do rebase-testing of these.
@@ -47,32 +47,44 @@ struct Opts {
 
 fn main() -> anyhow::Result<()> {
     let opts = Opts::from_args();
-    let repo = Repository::open_ext(&opts.repo, git2::RepositoryOpenFlags::empty(), Option::<String>::None)
-        .with_context(|| format!("Opening repo {}", opts.repo))?;
+    let repo = Repository::open_ext(
+        &opts.repo,
+        git2::RepositoryOpenFlags::empty(),
+        Option::<String>::None,
+    )
+    .with_context(|| format!("Opening repo {}", opts.repo))?;
 
     // 1. Compute first-parent history of master to determine where
     //    the fork point of the PR was
     let mut parent_commits = HashSet::new();
-    let rf = repo.revparse_single(&opts.master)
+    let rf = repo
+        .revparse_single(&opts.master)
         .with_context(|| format!("looking up master ref {}", opts.master))?;
 
     let master_id = rf.id();
-    let master_tip = repo.find_commit(master_id)
+    let master_tip = repo
+        .find_commit(master_id)
         .with_context(|| format!("reading master oid {} as a commit", master_id))?;
     let mut parent = Ok(master_tip.clone());
     while let Ok(parent_commit) = parent {
         parent_commits.insert(parent_commit.id());
         parent = parent_commit.parent(0);
     }
-    println!("Found {} parent commits starting from master {}", parent_commits.len(), master_id);
+    println!(
+        "Found {} parent commits starting from master {}",
+        parent_commits.len(),
+        master_id
+    );
 
     // 2. Get set of commits in the PR (you can use label-pr to assign
     //    some sort of ordering to them, but for our purposes here we
     //    just test them all and don't care about the order).
-    let rf = repo.revparse_single(&opts.tip)
+    let rf = repo
+        .revparse_single(&opts.tip)
         .with_context(|| format!("looking up PR tip ref {}", opts.tip))?;
     let pr_id = rf.id();
-    let pr_tip = repo.find_commit(pr_id)
+    let pr_tip = repo
+        .find_commit(pr_id)
         .with_context(|| format!("reading PR tip oid {} as commit", rf.id()))?;
 
     let mut pr_linear_commits = vec![];
@@ -104,7 +116,9 @@ fn main() -> anyhow::Result<()> {
         println!("Note: PR is not based on master, but we cannot do rebase-testing as it contains merges.");
     }
     if !opts.allow_merges && has_merges {
-        return Err(anyhow::Error::msg("Refusing to check a PR with merges. Use --allow-merges to allow."));
+        return Err(anyhow::Error::msg(
+            "Refusing to check a PR with merges. Use --allow-merges to allow.",
+        ));
     }
 
     // 3. Construct rebase commits, if needed and possible
@@ -112,18 +126,27 @@ fn main() -> anyhow::Result<()> {
     if needs_rebase && !has_merges {
         let worktree = self::git::TempWorktree::new(&repo, None)
             .context("creating temporary worktree to do rebase in")?;
-        let wt_repo = worktree.repo().context("getting temporary worktree as repo")?;
+        let wt_repo = worktree
+            .repo()
+            .context("getting temporary worktree as repo")?;
 
-        wt_repo.set_head_detached(master_tip.id())
+        wt_repo
+            .set_head_detached(master_tip.id())
             .with_context(|| format!("setting rebase worktree to master {}", master_tip.id()))?;
-        wt_repo.checkout_head(None).context("checking out HEAD in rebase worktree")?;
+        wt_repo
+            .checkout_head(None)
+            .context("checking out HEAD in rebase worktree")?;
 
         for commit in &pr_linear_commits {
             let current_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
 
             let mut merge_opts = git2::MergeOptions::new();
             merge_opts.fail_on_conflict(true);
-            wt_repo.cherrypick(commit, Some(git2::CherrypickOptions::new().merge_opts(merge_opts)))
+            wt_repo
+                .cherrypick(
+                    commit,
+                    Some(git2::CherrypickOptions::new().merge_opts(merge_opts)),
+                )
                 .with_context(|| format!("cherry-picking {} onto {}", commit.id(), current_head))?;
 
             let new_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
@@ -131,7 +154,12 @@ fn main() -> anyhow::Result<()> {
                 println!("Skipping cherry-pick of {} (no change).", commit.id());
             } else {
                 pr_commit_set.insert(new_head);
-                println!("Cherry-picked {} onto {} as {}.", commit.id(), current_head, new_head);
+                println!(
+                    "Cherry-picked {} onto {} as {}.",
+                    commit.id(),
+                    current_head,
+                    new_head
+                );
             }
         }
     }
@@ -139,8 +167,11 @@ fn main() -> anyhow::Result<()> {
     // 4. Put original commits into our set
     PullRequest {
         number: 0, // irrelevant for us
-        id: pr_id
-    }.for_each_commit(&repo, &parent_commits, |id, _, _| { pr_commit_set.insert(id); });
+        id: pr_id,
+    }
+    .for_each_commit(&repo, &parent_commits, |id, _, _| {
+        pr_commit_set.insert(id);
+    });
 
     // 5. Spawn new repos for all of our checks
     for id in pr_commit_set {
@@ -150,4 +181,3 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

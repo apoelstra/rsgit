@@ -16,7 +16,7 @@
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
-use serde::{Deserialize, Serialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -32,7 +32,9 @@ fn default_fuzz_iters() -> usize {
 /// to decode strings as single-element vecs of strings. Modified to
 /// be generic
 fn single_or_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-    where D: Deserializer<'de>, T: Deserialize<'de>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
 {
     struct StringOrVec<T>(PhantomData<Vec<T>>);
 
@@ -44,13 +46,17 @@ fn single_or_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
         }
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where E: de::Error
+        where
+            E: de::Error,
         {
-            Ok(vec![Deserialize::deserialize(de::IntoDeserializer::into_deserializer(value))?])
+            Ok(vec![Deserialize::deserialize(
+                de::IntoDeserializer::into_deserializer(value),
+            )?])
         }
 
         fn visit_seq<S>(self, visitor: S) -> Result<Self::Value, S::Error>
-            where S: de::SeqAccess<'de>
+        where
+            S: de::SeqAccess<'de>,
         {
             Deserialize::deserialize(de::value::SeqAccessDeserializer::new(visitor))
         }
@@ -60,7 +66,7 @@ fn single_or_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 }
 
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all="kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum RustJob {
     Build,
     Examples,
@@ -69,14 +75,14 @@ pub enum RustJob {
 }
 
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all="kebab-case", tag = "type")]
+#[serde(rename_all = "kebab-case", tag = "type")]
 pub enum Check {
     Rust {
         #[serde(default)]
         features: Vec<String>,
-        #[serde(default, deserialize_with="single_or_seq")]
+        #[serde(default, deserialize_with = "single_or_seq")]
         version: Vec<String>,
-        #[serde(default = "default_rust_jobs", deserialize_with="single_or_seq")]
+        #[serde(default = "default_rust_jobs", deserialize_with = "single_or_seq")]
         jobs: Vec<RustJob>,
         #[serde(default)]
         only_tip: bool,
@@ -94,15 +100,19 @@ mod tests {
 
     #[test]
     fn decode_rust() {
-       let _ck: Check = serde_json::from_str("
+        let _ck: Check = serde_json::from_str(
+            "
             {
                 \"type\": \"rust\",
                 \"features\": [\"rand\", \"use-serde\", \"base64\"],
                 \"version\": [\"stable\", \"nightly\"]
             }
-       ").expect("decoding");
+       ",
+        )
+        .expect("decoding");
 
-       let _ck: Check = serde_json::from_str("
+        let _ck: Check = serde_json::from_str(
+            "
             {
                 \"type\": \"rust\",
                 \"only-tip\": true,
@@ -111,8 +121,8 @@ mod tests {
                 \"fuzz_iters\": 1000000,
                 \"jobs\": [ \"fuzz\" ]
             }
-       ").expect("decoding");
+       ",
+        )
+        .expect("decoding");
     }
 }
-
-

@@ -16,9 +16,9 @@
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
-use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::Entry;
 use git2::{Oid, Repository};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 /// Pull request branch
 pub struct PullRequest {
@@ -66,4 +66,3 @@ impl PullRequest {
         }
     }
 }
-

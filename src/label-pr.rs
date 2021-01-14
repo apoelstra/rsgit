@@ -24,18 +24,18 @@ use std::str::FromStr;
 use std::usize;
 
 use anyhow::Context;
-use structopt::StructOpt;
 use git2::{Repository, Signature};
+use structopt::StructOpt;
 
 use self::pr::PullRequest;
 
 #[derive(StructOpt, Debug)]
 struct Opts {
     /// The repository to tag PRs in
-    #[structopt(short="r", long="repo", default_value=".")]
+    #[structopt(short = "r", long = "repo", default_value = ".")]
     repo: String,
     /// Label structure to apply in the form pr_ref:master,branches:url_prefix
-    #[structopt(name="labels")]
+    #[structopt(name = "labels")]
     labels: Vec<Label>,
 }
 
@@ -65,7 +65,11 @@ impl FromStr for Label {
             Some(prefix) => prefix.into(),
             None => return Err(format!("missing url_prefix field in {}", s)),
         };
-        Ok(Label { url_prefix, pr_ref, master })
+        Ok(Label {
+            url_prefix,
+            pr_ref,
+            master,
+        })
     }
 }
 
@@ -85,22 +89,33 @@ fn main() -> anyhow::Result<()> {
     for label in &opts.labels {
         // 1. Collect PRs
         let mut prs = vec![];
-        println!("Labeling {} from refs/remotes/{} (master branch {:?})", label.url_prefix, label.pr_ref, label.master);
+        println!(
+            "Labeling {} from refs/remotes/{} (master branch {:?})",
+            label.url_prefix, label.pr_ref, label.master
+        );
         'ref_loop: for rf in repo.references().expect("get references") {
             let rf = rf.expect("reference is legit");
             if rf.is_remote() {
                 let name = rf.name().unwrap();
                 let mut segments = name.split('/');
-                if segments.next() != Some("refs") { continue; }
-                if segments.next() != Some("remotes") { continue; }
+                if segments.next() != Some("refs") {
+                    continue;
+                }
+                if segments.next() != Some("remotes") {
+                    continue;
+                }
                 for seg in label.pr_ref.split('/') {
-                     if segments.next() != Some(seg) { continue 'ref_loop; }
+                    if segments.next() != Some(seg) {
+                        continue 'ref_loop;
+                    }
                 }
                 let num = match segments.next().map(usize::from_str) {
                     Some(Ok(n)) => n,
                     _ => continue,
                 };
-                if segments.next() != Some("head") { continue; }
+                if segments.next() != Some("head") {
+                    continue;
+                }
                 prs.push(PullRequest {
                     number: num,
                     id: rf.target().expect("dereference pr ref"),
@@ -108,7 +123,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         println!("Found {} PRs", prs.len());
-    
+
         // 2. Check master tree
         let mut parent_commits = HashSet::new();
         for master in &label.master {
@@ -120,19 +135,17 @@ fn main() -> anyhow::Result<()> {
             }
         }
         println!("Found {} parent commits", parent_commits.len());
-    
+
         // 3. Build map of notes
         for pr in &prs {
-            pr.for_each_commit(
-                &repo,
-                &parent_commits,
-                |id, index, n_commits| note_map.entry(id).or_insert(vec![]).push(Note {
+            pr.for_each_commit(&repo, &parent_commits, |id, index, n_commits| {
+                note_map.entry(id).or_insert(vec![]).push(Note {
                     url_prefix: &label.url_prefix,
                     pr_num: pr.number,
                     commit_index: n_commits - index,
                     n_commits: n_commits,
-                }),
-            );
+                })
+            });
         }
         println!("Labelling {} commits", note_map.len());
     }
@@ -144,31 +157,43 @@ fn main() -> anyhow::Result<()> {
         notes.sort_by_key(|note| (note.url_prefix, note.pr_num));
 
         for note in notes {
-            msg.push_str(&format!("PR: {}{} ({}/{})\n", note.url_prefix, note.pr_num, note.commit_index, note.n_commits));
+            msg.push_str(&format!(
+                "PR: {}{} ({}/{})\n",
+                note.url_prefix, note.pr_num, note.commit_index, note.n_commits
+            ));
         }
         let blob_id = repo.blob(msg.as_bytes()).expect("writing note blob");
-        note_tree.insert(id.to_string(), blob_id, 33188).expect("putting note blob in tree");
+        note_tree
+            .insert(id.to_string(), blob_id, 33188)
+            .expect("putting note blob in tree");
     }
     let note_tree_id = note_tree.write().expect("writing new note tree");
-    let note_tree = repo.find_tree(note_tree_id).expect("reading tree we just wrote");
+    let note_tree = repo
+        .find_tree(note_tree_id)
+        .expect("reading tree we just wrote");
 
     // 5. Put notes into repo
     let mut parents = vec![];
     if let Ok(existing) = repo.find_reference("refs/notes/label-pr") {
-        parents.push(existing.peel_to_commit().expect("existing ref points to commit"));
+        parents.push(
+            existing
+                .peel_to_commit()
+                .expect("existing ref points to commit"),
+        );
     }
     let parents_refs: Vec<&_> = parents.iter().collect(); // we need a slice of references for `commit()`
     let sig = Signature::now("PR Labeller", "prlabel@wpsoftware.net").expect("create sig");
-    let comm_id = repo.commit(
-        Some("refs/notes/label-pr"),
-        &sig,
-        &sig,
-        "Notes added by label-pr utility",
-        &note_tree,
-        &parents_refs,
-    ).expect("committing new notes");
+    let comm_id = repo
+        .commit(
+            Some("refs/notes/label-pr"),
+            &sig,
+            &sig,
+            "Notes added by label-pr utility",
+            &note_tree,
+            &parents_refs,
+        )
+        .expect("committing new notes");
 
     println!("Done. Added new notes as {}", comm_id);
     Ok(())
 }
-
