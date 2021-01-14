@@ -17,6 +17,7 @@
 //
 
 mod checks;
+mod git;
 mod pr;
 
 use std::collections::HashSet;
@@ -76,7 +77,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut pr_linear_commits = vec![];
     let mut has_merges = false;
-    let mut needs_rebase = false;
+    let mut needs_rebase = true;
     let mut parent = Ok(pr_tip.clone());
     while let Ok(parent_commit) = parent {
         let id = parent_commit.id();
@@ -87,7 +88,7 @@ fn main() -> anyhow::Result<()> {
             break;
         }
 
-        if parent_commit.parent_count() > 0 {
+        if parent_commit.parent_count() > 1 {
             has_merges = true;
             println!("Note: commit {} is a merge commit.", id);
         }
@@ -129,7 +130,11 @@ fn main() -> anyhow::Result<()> {
         id: pr_id
     }.for_each_commit(&repo, &parent_commits, |id, _, _| { pr_commit_set.insert(id); });
 
-    // 5. Do checks
+    // 5. Spawn new repos for all of our checks
+    for id in pr_commit_set {
+        let fresh_repo = self::git::temp_repo(&repo, id)
+            .with_context(|| format!("creating temporary repo for {}", id))?;
+    }
 
     Ok(())
 }

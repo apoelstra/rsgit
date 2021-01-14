@@ -8,10 +8,11 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0"
+git2 = { version = "0.13", default_features = false }
 serde = { version = "1.0", features = [ "derive" ] }
 serde_json = "1.0"
 structopt = "0.3"
-git2 = { version = "0.13", default_features = false }
+tempfile = "3.0"
 
 [[bin]]
 name = "label-pr"
