@@ -17,13 +17,17 @@
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
+mod pr;
+
 use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::Entry;
 use std::str::FromStr;
 use std::usize;
 
+use anyhow::Context;
 use structopt::StructOpt;
-use git2::{Oid, Repository, Signature};
+use git2::{Repository, Signature};
+
+use self::pr::PullRequest;
 
 #[derive(StructOpt, Debug)]
 struct Opts {
@@ -65,11 +69,6 @@ impl FromStr for Label {
     }
 }
 
-struct PullRequest {
-    number: usize,
-    id: Oid,
-}
-
 struct Note<'label> {
     url_prefix: &'label str,
     pr_num: usize,
@@ -77,53 +76,10 @@ struct Note<'label> {
     n_commits: usize,
 }
 
-impl PullRequest {
-    fn get_ancestors<'label>(
-        &self,
-        repo: &Repository,
-        master_commits: &HashSet<Oid>,
-        note_map: &mut HashMap<Oid, Vec<Note<'label>>>,
-        url_prefix: &'label str,
-    ) {
-        let mut pr_map = HashMap::new();
-
-        let mut stack = vec![vec![repo.find_commit(self.id).expect("look up commit")]];
-        let mut idx = 0;
-        while let Some(tips) = stack.pop() {
-            for tip in tips {
-                match pr_map.entry(tip.id()) {
-                    Entry::Occupied(_) => continue, // already seen
-                    Entry::Vacant(vac) => vac.insert(idx),
-                };
-                idx += 1;
-
-                let mut parent_vec = Vec::with_capacity(tip.parent_count());
-                for parent in tip.parents() {
-                    if !master_commits.contains(&parent.id()) {
-                        parent_vec.push(parent);
-                    }
-                }
-                if !parent_vec.is_empty() {
-                    stack.push(parent_vec);
-                }
-            }
-        }
-
-        let n_commits = pr_map.len();
-        for (id, index) in pr_map {
-            note_map.entry(id).or_insert(vec![]).push(Note {
-                url_prefix: url_prefix,
-                pr_num: self.number,
-                commit_index: n_commits - index,
-                n_commits: n_commits,
-            });
-        }
-    }
-}
-
-fn main() {
+fn main() -> anyhow::Result<()> {
     let opts = Opts::from_args();
-    let repo = Repository::open(&opts.repo).expect("open repo");
+    let repo = Repository::open_ext(&opts.repo, git2::RepositoryOpenFlags::empty(), Some("/"))
+        .with_context(|| format!("Opening repo {}", opts.repo))?;
 
     let mut note_map = HashMap::new();
     for label in &opts.labels {
@@ -167,7 +123,16 @@ fn main() {
     
         // 3. Build map of notes
         for pr in &prs {
-            pr.get_ancestors(&repo, &parent_commits, &mut note_map, &label.url_prefix);
+            pr.for_each_commit(
+                &repo,
+                &parent_commits,
+                |id, index, n_commits| note_map.entry(id).or_insert(vec![]).push(Note {
+                    url_prefix: &label.url_prefix,
+                    pr_num: pr.number,
+                    commit_index: n_commits - index,
+                    n_commits: n_commits,
+                }),
+            );
         }
         println!("Labelling {} commits", note_map.len());
     }
@@ -204,5 +169,6 @@ fn main() {
     ).expect("committing new notes");
 
     println!("Done. Added new notes as {}", comm_id);
+    Ok(())
 }
 
