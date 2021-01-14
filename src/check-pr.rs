@@ -107,20 +107,32 @@ fn main() -> anyhow::Result<()> {
         return Err(anyhow::Error::msg("Refusing to check a PR with merges. Use --allow-merges to allow."));
     }
 
-    // 3. Construct rebase commits, if needed
+    // 3. Construct rebase commits, if needed and possible
     let mut pr_commit_set = HashSet::with_capacity(2 * pr_linear_commits.len());
     if needs_rebase && !has_merges {
-        let mut base = master_tip;
-        for commit in pr_linear_commits {
-            let mut index = repo.cherrypick_commit(&commit, &base, 0, None)
-                .with_context(|| format!("cherry-picking {} onto {}", commit.id(), base.id()))?;
-            let new_commit_id = index.write_tree()
-                .with_context(|| format!("writing tree for cherry-pick of {} onto {}", commit.id(), base.id()))?;
-            pr_commit_set.insert(new_commit_id);
-            base = repo.find_commit(new_commit_id)
-                .with_context(|| format!("finding commit {} we just made", new_commit_id))?;
+        let worktree = self::git::TempWorktree::new(&repo, None)
+            .context("creating temporary worktree to do rebase in")?;
+        let wt_repo = worktree.repo().context("getting temporary worktree as repo")?;
 
-            println!("Cherry-picked {} onto {} as {}.", commit.id(), base.id(), new_commit_id);
+        wt_repo.set_head_detached(master_tip.id())
+            .with_context(|| format!("setting rebase worktree to master {}", master_tip.id()))?;
+        wt_repo.checkout_head(None).context("checking out HEAD in rebase worktree")?;
+
+        for commit in &pr_linear_commits {
+            let current_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
+
+            let mut merge_opts = git2::MergeOptions::new();
+            merge_opts.fail_on_conflict(true);
+            wt_repo.cherrypick(commit, Some(git2::CherrypickOptions::new().merge_opts(merge_opts)))
+                .with_context(|| format!("cherry-picking {} onto {}", commit.id(), current_head))?;
+
+            let new_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
+            if new_head == old_head {
+                println!("Skipping cherry-pick of {} (no change).", commit.id());
+            } else {
+                pr_commit_set.insert(new_head);
+                println!("Cherry-picked {} onto {} as {}.", commit.id(), current_head, new_head);
+            }
         }
     }
 
