@@ -167,12 +167,6 @@ pub fn temp_repo<'src>(source: &'src Repository, commit_id: git2::Oid) -> anyhow
         .with_context(|| format!("getting tree for {}", commit_id))?;
 
     let new_repo = TempRepo::new()?;
-    println!(
-        "Creating new repo in {} with commit {} read into it",
-        new_repo.path(),
-        commit_id
-    );
-
     new_repo
         .copy_tree(&tree, source)
         .with_context(|| format!("copying commit {}'s tree to {}", commit_id, new_repo.path()))?;

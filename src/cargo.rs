@@ -117,13 +117,23 @@ impl<'a> Cargo<'a> {
     }
 
     /// Tries to execute the `cargo build` command
-    pub fn build(&self) -> anyhow::Result<()> {
-        exec_or_stderr(self.exec.clone().arg("build"))
+    pub fn build(&self, features: &[String]) -> anyhow::Result<()> {
+        exec_or_stderr(
+            self.exec
+                .clone()
+                .arg("build")
+                .arg(format!("--features={}", features.join(" "))),
+        )
     }
 
-    /// Tries to execute the `cargo build` command
-    pub fn test(&self) -> anyhow::Result<()> {
-        exec_or_stderr(self.exec.clone().arg("test"))
+    /// Tries to execute the `cargo test` command
+    pub fn test(&self, features: &[String]) -> anyhow::Result<()> {
+        exec_or_stderr(
+            self.exec
+                .clone()
+                .arg("test")
+                .arg(format!("--features={}", features.join(" "))),
+        )
     }
 
     /// Tries to execute the `cargo run --example` command

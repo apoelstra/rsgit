@@ -84,6 +84,14 @@ impl RustCheck {
             self.version.clone()
         };
 
+        let mut feature_matrix = vec![vec![]];
+        if !self.features.is_empty() {
+            feature_matrix.push(self.features.clone());
+        }
+        for feat in &self.features {
+            feature_matrix.push(vec![feat.clone()]);
+        }
+
         let head = repo.repo.head().context("getting HEAD")?.target().unwrap();
         let mut handles = vec![];
         for ver in versions {
@@ -97,6 +105,7 @@ impl RustCheck {
 
             let jobs = self.jobs.clone();
             let path_ext = self.working_dir.clone();
+            let feature_matrix = feature_matrix.clone();
             handles.push(JobHandle::spawn(build_pool, data, move || {
                 let repo_dir = &fresh_repo.dir;
 
@@ -107,12 +116,28 @@ impl RustCheck {
                 for job in &jobs {
                     match *job {
                         RustJob::Build => {
-                            println!("Building {} ({} / {})", head, c_ver, r_ver);
-                            cargo.build()?;
+                            feature_matrix.par_iter().try_for_each(|feats| {
+                                // Need a new cargo as the old one internally has stdout/err
+                                // `File`s that cannot be shared across threads
+                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
+                                println!(
+                                    "Building {} (features {:?}) ({} / {})",
+                                    head, feat, c_ver, r_ver
+                                );
+                                cargo.build(feats)
+                            })?;
                         }
                         RustJob::Test => {
-                            println!("Testing {} ({} / {})", head, c_ver, r_ver);
-                            cargo.test()?;
+                            feature_matrix.par_iter().try_for_each(|feats| {
+                                // Need a new cargo as the old one internally has stdout/err
+                                // `File`s that cannot be shared across threads
+                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
+                                println!(
+                                    "Building {} (features {:?}) ({} / {})",
+                                    head, feat, c_ver, r_ver
+                                );
+                                cargo.test(feats)
+                            })?;
                         }
                         RustJob::Examples => {
                             toml.example.par_iter().try_for_each(|ex| {
@@ -144,7 +169,6 @@ impl RustCheck {
             }));
         }
 
-        println!("Spawned {} jobs", handles.len());
         let mut result = Ok(vec![]);
         for h in handles {
             let new_res = h.join().with_context(|| {
