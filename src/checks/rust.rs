@@ -22,7 +22,7 @@ use anyhow::Context;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
-use std::{fmt, fs};
+use std::fmt;
 
 use crate::cargo::Cargo;
 use crate::git::{temp_repo, TempRepo};
@@ -51,6 +51,8 @@ pub enum RustJob {
 
 /// A rust check
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 pub struct RustCheck {
     #[serde(default)]
     features: Vec<String>,
@@ -73,19 +75,6 @@ impl fmt::Display for RustCheck {
     }
 }
 
-#[derive(Deserialize)]
-struct CargoToml {
-    #[serde(default)]
-    bin: Vec<Example>,
-    #[serde(default)]
-    example: Vec<Example>,
-}
-
-#[derive(Deserialize)]
-struct Example {
-    name: String,
-}
-
 impl RustCheck {
     pub fn execute(&self, repo: TempRepo, build_pool: &ThreadPool) -> anyhow::Result<Vec<String>> {
         let default_versions = vec!["stable".to_owned()];
@@ -100,16 +89,6 @@ impl RustCheck {
         for ver in versions {
             let fresh_repo = temp_repo(&repo.repo, head)
                 .with_context(|| format!("creating temporary repo for {}", head))?;
-            let mut path = fresh_repo.dir.path().to_path_buf();
-            if let Some(ext) = self.working_dir.as_ref() {
-                path.push(ext);
-            }
-
-            let toml_path = path.join("Cargo.toml");
-            let toml_str = fs::read_to_string(&toml_path)
-                .with_context(|| format!("reading {}", toml_path.to_string_lossy()))?;
-            let toml: CargoToml = toml::from_str(&toml_str)
-                .with_context(|| format!("parsing {}", toml_path.to_string_lossy()))?;
 
             let data = JobData {
                 version: ver.clone(),
@@ -117,10 +96,12 @@ impl RustCheck {
             };
 
             let jobs = self.jobs.clone();
+            let path_ext = self.working_dir.clone();
             handles.push(JobHandle::spawn(build_pool, data, move || {
-                let _fresh_repo = fresh_repo; // pull repo into subthread so it doesn't drop() and delete our working dir
+                let repo_dir = &fresh_repo.dir;
 
-                let cargo = Cargo::new(&ver, &path);
+                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
+                let toml = cargo.toml()?;
                 let c_ver = cargo.version_string()?;
                 let r_ver = cargo.rustc_version_string()?;
                 for job in &jobs {
@@ -137,7 +118,7 @@ impl RustCheck {
                             toml.example.par_iter().try_for_each(|ex| {
                                 // Need a new cargo as the old one internally has stdout/err
                                 // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(&ver, &path);
+                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
                                 println!(
                                     "Running example {} on {} ({} / {})",
                                     ex.name, head, c_ver, r_ver,
@@ -149,7 +130,7 @@ impl RustCheck {
                             toml.bin.par_iter().try_for_each(|fuzz| {
                                 // Need a new cargo as the old one internally has stdout/err
                                 // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(&ver, &path);
+                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
                                 println!(
                                     "Fuzzing {} on {} ({} / {})",
                                     fuzz.name, head, c_ver, r_ver,
@@ -178,7 +159,7 @@ impl RustCheck {
             }
 
             println!(
-                "success on commit {} with cargo {}",
+                "Completed all checks (commit {}, cargo {}",
                 h.data.commit, h.data.version,
             );
         }

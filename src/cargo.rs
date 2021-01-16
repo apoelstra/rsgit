@@ -19,26 +19,51 @@
 //! Utilities for handling a cargo instance
 
 use anyhow::Context;
+use serde::Deserialize;
+use tempfile::TempDir;
 
+use std::fs;
 use std::io::{self, BufRead, Read};
-use std::path::Path;
+use std::path::PathBuf;
 
+use crate::git::RepoRef;
 use crate::job::exec_or_stderr;
 
 /// Structure representing a cargo command
-pub struct Cargo {
+pub struct Cargo<'a> {
     exec: subprocess::Exec,
+    cwd: PathBuf,
+    version: String,
+    _ref: RepoRef<'a>,
 }
 
-impl Cargo {
+impl<'a> Cargo<'a> {
     /// Construct a new cargo instance
-    pub fn new<P: AsRef<Path>>(version: &str, cwd: P) -> Cargo {
+    pub fn new(version: String, tmp_dir: &'a TempDir, cwd_ext: Option<&String>) -> Self {
+        let mut cwd = tmp_dir.path().to_path_buf();
+        if let Some(s) = cwd_ext {
+            cwd.push(s);
+        }
+
         Cargo {
             exec: subprocess::Exec::cmd("cargo")
                 .arg(format!("+{}", version))
                 .stdin(subprocess::NullFile)
-                .cwd(cwd),
+                .cwd(&cwd),
+            cwd: cwd,
+            version: version,
+            _ref: tmp_dir.into(),
         }
+    }
+
+    /// Gets a parsed version of the toml file
+    pub fn toml(&self) -> anyhow::Result<CargoToml> {
+        let toml_path = self.cwd.join("Cargo.toml");
+        let toml_str = fs::read_to_string(&toml_path)
+            .with_context(|| format!("reading {}", toml_path.to_string_lossy()))?;
+        let toml: CargoToml = toml::from_str(&toml_str)
+            .with_context(|| format!("parsing {}", toml_path.to_string_lossy()))?;
+        Ok(toml)
     }
 
     /// Gets the version string of the cargo instance
@@ -68,25 +93,26 @@ impl Cargo {
 
     /// Gets the version string of the cargo instance
     pub fn rustc_version_string(&self) -> anyhow::Result<String> {
-        let exec = self
-            .exec
-            .clone()
-            .arg("rustc")
-            .arg("--")
+        let exec = subprocess::Exec::cmd("rustc")
+            .arg(format!("+{}", self.version))
+            .stdin(subprocess::NullFile)
             .arg("-V")
             .stdout(subprocess::Redirection::Pipe)
-            .stderr(subprocess::NullFile);
+            .stderr(subprocess::Redirection::Pipe);
         let invocation = exec.to_cmdline_lossy();
-        let mut popen = exec
-            .popen()
-            .context("constructing cargo rustc -V process")?;
-        let _ = popen.wait().context("waiting on cargo rustc -V")?;
+        let mut popen = exec.popen().context("constructing rustc -V process")?;
+        let exit_status = popen.wait().context("waiting on rustc -V")?;
         let bufread = io::BufReader::new(popen.stdout.take().unwrap());
         match bufread.lines().next() {
             Some(ver) => Ok(ver?),
-            None => Err(anyhow::Error::msg(
-                format!("no output from {}", invocation,),
-            )),
+            None => {
+                let mut stderr = String::new();
+                popen.stderr.as_mut().unwrap().read_to_string(&mut stderr)?;
+                Err(anyhow::Error::msg(format!(
+                    "no {} output. status {:?}, stderr {:?}",
+                    invocation, exit_status, stderr,
+                )))
+            }
         }
     }
 
@@ -120,4 +146,17 @@ impl Cargo {
             .arg(bin);
         exec_or_stderr(exec)
     }
+}
+
+#[derive(Deserialize)]
+pub struct CargoToml {
+    #[serde(default)]
+    pub bin: Vec<Example>,
+    #[serde(default)]
+    pub example: Vec<Example>,
+}
+
+#[derive(Deserialize)]
+pub struct Example {
+    pub name: String,
 }

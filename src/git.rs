@@ -21,6 +21,15 @@ use git2::{self, Repository, Tree};
 use std::borrow::Cow;
 use std::fs;
 
+/// Marker structure used to ensure that a temp object stays alive
+pub struct RepoRef<'a>(&'a ());
+
+impl<'a, T> From<&'a T> for RepoRef<'a> {
+    fn from(_: &'a T) -> Self {
+        RepoRef(&())
+    }
+}
+
 /// A structure representing a temporary worktree of the repository.
 /// When it is dropped the worktree will be removed
 pub struct TempWorktree {

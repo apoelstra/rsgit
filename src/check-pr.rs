@@ -230,11 +230,20 @@ fn real_main<'s>(
 
     // 5. Spawn new repos for all of our checks and execute them
 
+    let mut result = Ok(());
     let mut exec_threads = vec![];
+
     for id in pr_commit_set {
         for check in check_list {
-            let fresh_repo = self::git::temp_repo(&repo, id)
-                .with_context(|| format!("creating temporary repo for {}", id))?;
+            let fresh_repo = match self::git::temp_repo(&repo, id)
+                .with_context(|| format!("creating temporary repo for {}", id))
+            {
+                Ok(repo) => repo,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            };
             let (tx, rx) = mpsc::channel();
             s.spawn(move |_| {
                 tx.send(
@@ -252,7 +261,6 @@ fn real_main<'s>(
         }
     }
 
-    let mut result = Ok(());
     for handle in exec_threads {
         // FIXME should catch ctrl-C here signal everything to stop waiting
         match handle

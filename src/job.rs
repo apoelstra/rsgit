@@ -36,7 +36,7 @@ impl<T> JobHandle<T> {
     /// Creates a new job and starts running it in the threadpool
     pub fn spawn<F>(pool: &ThreadPool, ext_data: T, f: F) -> Self
     where
-        F: Fn() -> anyhow::Result<()> + Send + panic::UnwindSafe + 'static,
+        F: FnOnce() -> anyhow::Result<()> + Send + panic::UnwindSafe + 'static,
     {
         let (tx, rx) = mpsc::channel();
         pool.spawn(move || match panic::catch_unwind(f) {
