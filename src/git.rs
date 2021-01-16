@@ -70,14 +70,6 @@ impl TempWorktree {
             })
             .map_err(anyhow::Error::from)
     }
-
-    /// Accessor for the path as a unicode string
-    ///
-    /// If the underlying path has non-unicode characters they are
-    /// replaced by `U+FFFD REPLACEMENT CHARACTER`
-    pub fn path(&self) -> Cow<str> {
-        self.dir.path().to_string_lossy()
-    }
 }
 
 impl Drop for TempWorktree {
@@ -104,6 +96,10 @@ pub struct TempRepo {
     pub dir: tempfile::TempDir,
 }
 
+/// Safe because I'm fairly confident that `git2::Repository` could actually be
+/// `Send`.
+unsafe impl Send for TempRepo {}
+
 impl TempRepo {
     /// Creates a new temporary repo
     pub fn new() -> anyhow::Result<Self> {
@@ -120,7 +116,7 @@ impl TempRepo {
     }
 
     /// Copy an entire tree from a source repo and check it out
-    pub fn copy_tree_and_checkout<'src>(
+    pub fn copy_tree<'src>(
         &self,
         tree: &Tree<'src>,
         source: &'src Repository,
@@ -137,13 +133,7 @@ impl TempRepo {
         let new_id = index
             .write_tree_to(&self.repo)
             .with_context(|| format!("writing tree {} into index", tree.id()))?;
-        let new_obj = self
-            .repo
-            .find_object(new_id, None)
-            .with_context(|| format!("finding object {} that we just created", new_id))?;
-        self.repo
-            .checkout_tree(&new_obj, None)
-            .with_context(|| format!("checking out {}", new_id))?;
+        assert_eq!(new_id, tree.id());
 
         Ok(())
     }
@@ -168,9 +158,18 @@ pub fn temp_repo<'src>(source: &'src Repository, commit_id: git2::Oid) -> anyhow
         .with_context(|| format!("getting tree for {}", commit_id))?;
 
     let new_repo = TempRepo::new()?;
+    println!(
+        "Creating new repo in {} with commit {} read into it",
+        new_repo.path(),
+        commit_id
+    );
+
     new_repo
-        .copy_tree_and_checkout(&tree, source)
+        .copy_tree(&tree, source)
         .with_context(|| format!("copying commit {}'s tree to {}", commit_id, new_repo.path()))?;
+    copy_commit(source, &new_repo.repo, &commit)?;
+    new_repo.repo.set_head_detached(commit.id())?;
+    new_repo.repo.checkout_head(None)?;
 
     println!(
         "Created new repo in {} with commit {} read into it",
@@ -219,6 +218,29 @@ fn copy_tree<'src, 'dst>(
         .write(obj.kind(), obj.data())
         .with_context(|| format!("writing tree {} as ODB object", tree.id()))?;
     assert_eq!(new_id, tree.id());
+
+    Ok(())
+}
+
+/// Copy a commit from one repo into another
+///
+/// Does not copy the tree or parents or anything else. You will get an
+/// inconsistent repo if you are not very careful with this
+fn copy_commit<'src, 'dst>(
+    source: &'src Repository,
+    dest: &'dst Repository,
+    commit: &git2::Commit<'src>,
+) -> anyhow::Result<()> {
+    let src_odb = source.odb().context("getting odb for source repo")?;
+    let dst_odb = dest.odb().context("getting odb for dest repo")?;
+
+    let obj = src_odb
+        .read(commit.id())
+        .with_context(|| format!("reading commit {} as ODB object", commit.id()))?;
+    let new_id = dst_odb
+        .write(obj.kind(), obj.data())
+        .with_context(|| format!("writing commit {} as ODB object", commit.id()))?;
+    assert_eq!(new_id, commit.id());
 
     Ok(())
 }

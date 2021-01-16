@@ -16,14 +16,18 @@
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
+mod cargo;
 mod checks;
 mod git;
+mod job;
 mod pr;
 
 use std::collections::HashSet;
+use std::sync::mpsc;
 
 use anyhow::Context;
 use git2::Repository;
+use rayon::ThreadPoolBuilder;
 use structopt::StructOpt;
 
 use self::pr::PullRequest;
@@ -43,10 +47,25 @@ struct Opts {
     /// do rebase-testing of these.
     #[structopt(long)]
     allow_merges: bool,
+    /// The actual check to do
+    #[structopt(name = "CHECK")]
+    check: String,
 }
 
-fn main() -> anyhow::Result<()> {
-    let opts = Opts::from_args();
+struct ThreadData {
+    rx: mpsc::Receiver<anyhow::Result<Vec<String>>>,
+    commit: git2::Oid,
+    desc: String,
+}
+
+/// Wrapper for the functionality of main to get the ability to spawn scoped threads
+fn real_main<'s>(
+    s: &rayon::Scope<'s>,
+    check_list: &'s [self::checks::Check],
+    opts: &Opts,
+    build_pool: &'s rayon::ThreadPool,
+) -> anyhow::Result<()> {
+    // 0. Open repo.
     let repo = Repository::open_ext(
         &opts.repo,
         git2::RepositoryOpenFlags::empty(),
@@ -107,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         parent = parent_commit.parent(0);
         pr_linear_commits.push(parent_commit);
     }
+    pr_linear_commits.reverse();
 
     // Alert user about merge/rebaseability story
     if needs_rebase {
@@ -119,6 +139,13 @@ fn main() -> anyhow::Result<()> {
         return Err(anyhow::Error::msg(
             "Refusing to check a PR with merges. Use --allow-merges to allow.",
         ));
+    }
+
+    if !has_merges {
+        println!("Found linear history");
+        for commit in &pr_linear_commits {
+            println!("    {}", commit.id());
+        }
     }
 
     // 3. Construct rebase commits, if needed and possible
@@ -139,6 +166,9 @@ fn main() -> anyhow::Result<()> {
 
         for commit in &pr_linear_commits {
             let current_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
+            let current_commit = wt_repo
+                .find_commit(current_head)
+                .with_context(|| format!("looking up tip of temp worktree {}", current_head))?;
 
             let mut merge_opts = git2::MergeOptions::new();
             merge_opts.fail_on_conflict(true);
@@ -149,9 +179,34 @@ fn main() -> anyhow::Result<()> {
                 )
                 .with_context(|| format!("cherry-picking {} onto {}", commit.id(), current_head))?;
 
+            let mut index = wt_repo.index().context("getting index")?;
+            let tree_oid = index.write_tree().context("writing index to tree")?;
+            let tree = wt_repo
+                .find_tree(tree_oid)
+                .context("looking up tree we just created")?;
+            let message = format!(
+                "{}\nCherry-picked from {}\n",
+                commit.message().unwrap_or(""),
+                commit.id()
+            );
+            wt_repo
+                .commit(
+                    Some("HEAD"),
+                    &commit.author(),
+                    &commit.committer(),
+                    &message,
+                    &tree,
+                    &[&current_commit],
+                )
+                .context("committing cherry-pick")?;
+
             let new_head = wt_repo.head().context("getting HEAD")?.target().unwrap();
-            if new_head == old_head {
-                println!("Skipping cherry-pick of {} (no change).", commit.id());
+            if new_head == current_head {
+                println!(
+                    "Skipping cherry-pick of {} onto {} (no change).",
+                    commit.id(),
+                    new_head
+                );
             } else {
                 pr_commit_set.insert(new_head);
                 println!(
@@ -173,11 +228,69 @@ fn main() -> anyhow::Result<()> {
         pr_commit_set.insert(id);
     });
 
-    // 5. Spawn new repos for all of our checks
+    // 5. Spawn new repos for all of our checks and execute them
+
+    let mut exec_threads = vec![];
     for id in pr_commit_set {
-        let fresh_repo = self::git::temp_repo(&repo, id)
-            .with_context(|| format!("creating temporary repo for {}", id))?;
+        for check in check_list {
+            let fresh_repo = self::git::temp_repo(&repo, id)
+                .with_context(|| format!("creating temporary repo for {}", id))?;
+            let (tx, rx) = mpsc::channel();
+            s.spawn(move |_| {
+                tx.send(
+                    check
+                        .execute(fresh_repo, build_pool)
+                        .with_context(|| format!("executing check {} on commit {}", check, id)),
+                )
+                .expect("main still alive")
+            });
+            exec_threads.push(ThreadData {
+                rx: rx,
+                commit: id,
+                desc: check.to_string(),
+            });
+        }
     }
 
-    Ok(())
+    let mut result = Ok(());
+    for handle in exec_threads {
+        // FIXME should catch ctrl-C here signal everything to stop waiting
+        match handle
+            .rx
+            .recv()
+            .expect("execution thread to not panic")
+            .with_context(|| format!("subthread: commit {}, check {}", handle.commit, handle.desc))
+        {
+            Ok(ref notes) => {
+                println!("Success on {}, notes {:?}", handle.commit, notes);
+            }
+            Err(e) => result = Err(e),
+        }
+    }
+
+    result
+}
+
+fn main() -> anyhow::Result<()> {
+    // Construct variables that need to outlive every thread
+    let opts = Opts::from_args();
+
+    let check_list: Vec<self::checks::Check> =
+        serde_json::from_str(&opts.check).context("parsing check list JSON")?;
+
+    let build_pool = ThreadPoolBuilder::new()
+        .num_threads(32)
+        .build()
+        .context("setting up thread pool")?;
+
+    // Create a scoped-thread scope and actually execute main
+    let (tx, rx) = mpsc::channel();
+    rayon::scope(|s| {
+        let tx = tx; // force move into by-ref closure
+        tx.send(real_main(s, &check_list, &opts, &build_pool))
+            .expect("main alive");
+    });
+
+    // Get real_main's return value and return it
+    rx.recv().expect("main alive")
 }

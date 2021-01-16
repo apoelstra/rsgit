@@ -16,17 +16,14 @@
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
+mod rust;
+
+use rayon::ThreadPool;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
 
-fn default_rust_jobs() -> Vec<RustJob> {
-    vec![RustJob::Build, RustJob::Test, RustJob::Examples]
-}
-
-fn default_fuzz_iters() -> usize {
-    100_000
-}
+use crate::git::TempRepo;
 
 /// serde helper from https://stackoverflow.com/a/43627388/14495533
 /// to decode strings as single-element vecs of strings. Modified to
@@ -66,31 +63,25 @@ where
 }
 
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RustJob {
-    Build,
-    Examples,
-    Test,
-    Fuzz,
-}
-
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum Check {
-    Rust {
-        #[serde(default)]
-        features: Vec<String>,
-        #[serde(default, deserialize_with = "single_or_seq")]
-        version: Vec<String>,
-        #[serde(default = "default_rust_jobs", deserialize_with = "single_or_seq")]
-        jobs: Vec<RustJob>,
-        #[serde(default)]
-        only_tip: bool,
-        #[serde(default)]
-        fuzz_dir: Option<String>,
-        #[serde(default = "default_fuzz_iters")]
-        fuzz_iters: usize,
-    },
+    Rust(self::rust::RustCheck),
+}
+
+impl Check {
+    pub fn execute(&self, repo: TempRepo, build_pool: &ThreadPool) -> anyhow::Result<Vec<String>> {
+        match *self {
+            Check::Rust(ref sub) => sub.execute(repo, build_pool),
+        }
+    }
+}
+
+impl fmt::Display for Check {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Check::Rust(ref sub) => sub.fmt(f),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -117,9 +108,21 @@ mod tests {
                 \"type\": \"rust\",
                 \"only-tip\": true,
                 \"version\": \"nightly\",
-                \"fuzz_dir\": \"fuzz/fuzz_targets\",
-                \"fuzz_iters\": 1000000,
-                \"jobs\": [ \"fuzz\" ]
+                \"working-dir\": \"fuzz\",
+                \"jobs\": [ \"test\", { \"fuzz\": { \"iters\": 1000000 } } ]
+            }
+       ",
+        )
+        .expect("decoding");
+
+        let _ck: Check = serde_json::from_str(
+            "
+            {
+                \"type\": \"rust\",
+                \"only-tip\": true,
+                \"version\": \"nightly\",
+                \"working-dir\": \"fuzz\",
+                \"jobs\": [ \"test\", { \"fuzz\": {} } ]
             }
        ",
         )
