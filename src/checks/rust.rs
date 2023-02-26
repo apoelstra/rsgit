@@ -22,7 +22,9 @@ use anyhow::Context;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::sync::{Arc, Mutex};
+use std::{fmt, mem};
+use tempfile::TempDir;
 
 use crate::cargo::Cargo;
 use crate::git::{temp_repo, TempRepo};
@@ -37,7 +39,7 @@ fn default_fuzz_iters() -> usize {
 }
 
 /// A rust-check job
-#[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RustJob {
     Build,
@@ -47,6 +49,110 @@ pub enum RustJob {
         #[serde(default = "default_fuzz_iters")]
         iters: usize,
     },
+}
+
+/// A single check (i.e. cargo invocation)
+struct SingleCheck<'a, 'b, 'c> {
+    cargo_ver: String,
+    repo: &'a TempDir,
+    path_ext: Option<&'b String>,
+    job: RustJob,
+    ext: &'c [String],
+}
+
+impl<'a, 'b, 'c> SingleCheck<'a, 'b, 'c> {
+    fn new(
+        cargo_ver: String,
+        repo: &'a TempDir,
+        path_ext: Option<&'b String>,
+        job: RustJob,
+        ext: &'c [String],
+    ) -> Self {
+        SingleCheck {
+            cargo_ver: cargo_ver,
+            repo: repo,
+            path_ext: path_ext,
+            job: job,
+            ext: ext,
+        }
+    }
+
+    fn notes_str(&self) -> String {
+        match self.job {
+            RustJob::Build => format!(
+                "{} cargo build '--features={}'",
+                self.cargo_ver,
+                self.ext.join(" "),
+            ),
+            RustJob::Test => format!(
+                "{} cargo test '--features={}'",
+                self.cargo_ver,
+                self.ext.join(" "),
+            ),
+            RustJob::Examples => {
+                format!("{} cargo run '--example {}'", self.cargo_ver, self.ext[0],)
+            }
+            RustJob::Fuzz { iters } => format!(
+                "{} cargo hfuzz run {} # iters {}",
+                self.cargo_ver, self.ext[0], iters,
+            ),
+        }
+    }
+
+    fn run(
+        self,
+        head: git2::Oid,
+        existing_notes: &[String],
+        new_notes: &Mutex<Vec<String>>,
+    ) -> anyhow::Result<()> {
+        let my_note = self.notes_str();
+        for note in existing_notes {
+            // Already done
+            if note == &my_note {
+                return Ok(());
+            }
+        }
+
+        // Need a new cargo as the old one internally has stdout/err
+        // `File`s that cannot be shared across threads
+        let cargo = Cargo::new(self.cargo_ver, self.repo, self.path_ext);
+        let c_ver = cargo.version_string()?;
+        let r_ver = cargo.rustc_version_string()?;
+        let result = match self.job {
+            RustJob::Build => {
+                println!(
+                    "Building {} (features {:?}) ({} / {})",
+                    head, self.ext, c_ver, r_ver
+                );
+                cargo.build(&self.ext)
+            }
+            RustJob::Test => {
+                println!(
+                    "Testing {} (features {:?}) ({} / {})",
+                    head, self.ext, c_ver, r_ver
+                );
+                cargo.test(&self.ext)
+            }
+            RustJob::Examples => {
+                assert_eq!(self.ext.len(), 1);
+                println!(
+                    "Running example {} on {} ({} / {})",
+                    &self.ext[0], head, c_ver, r_ver,
+                );
+                cargo.example(&self.ext[0])
+            }
+            RustJob::Fuzz { iters } => {
+                assert_eq!(self.ext.len(), 1);
+                println!(
+                    "Fuzzing {} on {} ({} / {})",
+                    &self.ext[0], head, c_ver, r_ver,
+                );
+                cargo.fuzz(&self.ext[0], iters)
+            }
+        }?;
+        new_notes.lock().unwrap().push(my_note);
+        Ok(result)
+    }
 }
 
 /// A rust check
@@ -93,6 +199,16 @@ impl RustCheck {
         }
 
         let head = repo.repo.head().context("getting HEAD")?.target().unwrap();
+        let existing_notes = repo
+            .repo
+            .find_note(Some("refs/notes/check-commit"), head)
+            .ok()
+            .as_ref()
+            .and_then(|note| note.message())
+            .map(|text| text.split('\n').map(|s| s.to_owned()).collect())
+            .unwrap_or(vec![]);
+        let existing_notes = Arc::new(existing_notes);
+
         let mut handles = vec![];
         for ver in versions {
             let fresh_repo = temp_repo(&repo.repo, head)
@@ -101,66 +217,57 @@ impl RustCheck {
             let data = JobData {
                 version: ver.clone(),
                 commit: head,
+                new_notes: Arc::new(Mutex::new(vec![])),
             };
 
             let jobs = self.jobs.clone();
             let path_ext = self.working_dir.clone();
             let feature_matrix = feature_matrix.clone();
+            let notes = existing_notes.clone();
+            let new_notes = data.new_notes.clone();
             handles.push(JobHandle::spawn(build_pool, data, move || {
                 let repo_dir = &fresh_repo.dir;
 
                 let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
+                cargo.pin_deps().context("pinning dependencies")?;
+
                 let toml = cargo.toml()?;
-                let c_ver = cargo.version_string()?;
-                let r_ver = cargo.rustc_version_string()?;
                 for job in &jobs {
                     match *job {
-                        RustJob::Build => {
+                        RustJob::Build | RustJob::Test => {
                             feature_matrix.par_iter().try_for_each(|feats| {
-                                // Need a new cargo as the old one internally has stdout/err
-                                // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
-                                println!(
-                                    "Building {} (features {:?}) ({} / {})",
-                                    head, feat, c_ver, r_ver
-                                );
-                                cargo.build(feats)
-                            })?;
-                        }
-                        RustJob::Test => {
-                            feature_matrix.par_iter().try_for_each(|feats| {
-                                // Need a new cargo as the old one internally has stdout/err
-                                // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
-                                println!(
-                                    "Building {} (features {:?}) ({} / {})",
-                                    head, feat, c_ver, r_ver
-                                );
-                                cargo.test(feats)
+                                SingleCheck::new(
+                                    ver.clone(),
+                                    &repo_dir,
+                                    path_ext.as_ref(),
+                                    *job,
+                                    feats,
+                                )
+                                .run(head, &*notes, &*new_notes)
                             })?;
                         }
                         RustJob::Examples => {
                             toml.example.par_iter().try_for_each(|ex| {
-                                // Need a new cargo as the old one internally has stdout/err
-                                // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
-                                println!(
-                                    "Running example {} on {} ({} / {})",
-                                    ex.name, head, c_ver, r_ver,
-                                );
-                                cargo.example(&ex.name)
+                                SingleCheck::new(
+                                    ver.clone(),
+                                    &repo_dir,
+                                    path_ext.as_ref(),
+                                    *job,
+                                    &[ex.name.clone()],
+                                )
+                                .run(head, &*notes, &*new_notes)
                             })?;
                         }
-                        RustJob::Fuzz { iters } => {
+                        RustJob::Fuzz { .. } => {
                             toml.bin.par_iter().try_for_each(|fuzz| {
-                                // Need a new cargo as the old one internally has stdout/err
-                                // `File`s that cannot be shared across threads
-                                let cargo = Cargo::new(ver.clone(), &repo_dir, path_ext.as_ref());
-                                println!(
-                                    "Fuzzing {} on {} ({} / {})",
-                                    fuzz.name, head, c_ver, r_ver,
-                                );
-                                cargo.fuzz(&fuzz.name, iters)
+                                SingleCheck::new(
+                                    ver.clone(),
+                                    &repo_dir,
+                                    path_ext.as_ref(),
+                                    *job,
+                                    &[fuzz.name.clone()],
+                                )
+                                .run(head, &*notes, &*new_notes)
                             })?;
                         }
                     }
@@ -178,7 +285,13 @@ impl RustCheck {
                 )
             });
             match new_res {
-                Ok(..) => { /* TODO */ }
+                Ok(()) => {
+                    if let Ok(ref mut ret_notes) = result {
+                        let new_notes =
+                            mem::replace(&mut *h.data.new_notes.lock().unwrap(), vec![]);
+                        ret_notes.extend(new_notes);
+                    }
+                }
                 Err(e) => result = Err(e),
             }
 
@@ -195,4 +308,5 @@ impl RustCheck {
 struct JobData {
     version: String,
     commit: git2::Oid,
+    new_notes: Arc<Mutex<Vec<String>>>,
 }

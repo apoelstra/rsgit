@@ -116,6 +116,37 @@ impl<'a> Cargo<'a> {
         }
     }
 
+    fn pin_dep(&self, dep: &str, version: &str) {
+        let exec = self.exec.clone().arg("update");
+        println!("Version {}: pinning {} to {}. ", self.version, dep, version);
+        if let Err(e) = exec_or_stderr(exec.arg("-p").arg(dep).arg("--precise").arg(version)) {
+            println!(
+                "failed) Version {}: pinning {} to {}. Error {}",
+                self.version, dep, version, e
+            );
+        }
+    }
+
+    /// Tries to execute the `cargo build` command
+    pub fn pin_deps(&self) -> anyhow::Result<()> {
+        // Gate everything on generating the lockfile. Sometimes we
+        // can't, e.g. if the project has `cargo vendor`ed a git repo.
+        // In this case we can't pin deps anyway so don't try.
+        if exec_or_stderr(self.exec.clone().arg("generate-lockfile")).is_ok() {
+            exec_or_stderr(self.exec.clone().arg("update"))?;
+            if &self.version[..] < "1.31.0" {
+                // Also don't report failure on any of these, since we don't
+                // know which deps are actually used
+                self.pin_dep("byteorder", "1.3.4");
+                self.pin_dep("cc", "1.0.41");
+                self.pin_dep("serde_json", "1.0.39");
+                self.pin_dep("serde", "1.0.98");
+                self.pin_dep("serde_derive", "1.0.98");
+            }
+        }
+        Ok(())
+    }
+
     /// Tries to execute the `cargo build` command
     pub fn build(&self, features: &[String]) -> anyhow::Result<()> {
         exec_or_stderr(

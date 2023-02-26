@@ -270,7 +270,28 @@ fn real_main<'s>(
             .with_context(|| format!("subthread: commit {}, check {}", handle.commit, handle.desc))
         {
             Ok(ref notes) => {
-                println!("Success on {}, notes {:?}", handle.commit, notes);
+                let mut note_str = format!("{}\n", time::now_utc().rfc3339());
+                for note in notes {
+                    note_str.push_str(note);
+                    note_str.push_str("\n");
+                }
+
+                let sig = git2::Signature::now("PR Checker", "prcheck@wpsoftware.net")
+                    .context("creating git signature for new note")?;
+                let note_oid = repo
+                    .note(
+                        &sig,
+                        &sig,
+                        Some("refs/notes/check-commit"),
+                        handle.commit,
+                        &note_str,
+                        true,
+                    )
+                    .with_context(|| format!("Adding notes to {}", handle.commit))?;
+                println!(
+                    "Success on {}. Recorded notes in ref {}",
+                    handle.commit, note_oid
+                );
             }
             Err(e) => result = Err(e),
         }
@@ -286,8 +307,11 @@ fn main() -> anyhow::Result<()> {
     let check_list: Vec<self::checks::Check> =
         serde_json::from_str(&opts.check).context("parsing check list JSON")?;
 
+    // cargo can get jammed if you spawn too many instances at once, and anyway
+    // it launches many rustcs at once, which are all themselves multithreaded,
+    // so limit the size of the builder pool to something fairly small.
     let build_pool = ThreadPoolBuilder::new()
-        .num_threads(32)
+        .num_threads(8)
         .build()
         .context("setting up thread pool")?;
 

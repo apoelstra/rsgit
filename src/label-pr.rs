@@ -119,7 +119,7 @@ fn main() -> anyhow::Result<()> {
                 prs.push(PullRequest {
                     number: num,
                     id: rf.target().expect("dereference pr ref"),
-                })
+                });
             }
         }
         println!("Found {} PRs", prs.len());

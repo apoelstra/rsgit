@@ -22,7 +22,7 @@ use anyhow::Context;
 use rayon::ThreadPool;
 use std::io::Read;
 use std::panic;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 /// Handle to construct/spawn an async job
@@ -68,6 +68,8 @@ impl<T> Drop for JobHandle<T> {
     }
 }
 
+static CID: AtomicUsize = AtomicUsize::new(0);
+
 /// Helper function to try to execute a command, putting
 /// stderr in the error return if it fails
 pub fn exec_or_stderr(e: subprocess::Exec) -> anyhow::Result<()> {
@@ -77,6 +79,8 @@ pub fn exec_or_stderr(e: subprocess::Exec) -> anyhow::Result<()> {
         .stderr(subprocess::Redirection::Pipe)
         .popen()
         .with_context(|| format!("constructing Exec: {}", invocation))?;
+    let cid = CID.fetch_add(1, Ordering::SeqCst);
+    //eprintln!(" ** {}: {} \n     {:?}", cid, invocation, backtrace::Backtrace::new());
     let fail_msg = match popen
         .wait()
         .with_context(|| format!("waiting: {}", invocation))?
@@ -85,6 +89,7 @@ pub fn exec_or_stderr(e: subprocess::Exec) -> anyhow::Result<()> {
         subprocess::ExitStatus::Exited(x) => Some(format!("exited with {}", x)),
         other => Some(format!("exited with {:?}", other)),
     };
+    //eprintln!(" ** DONE {}", cid);
     match fail_msg {
         Some(bad) => {
             let mut stderr = String::new();
