@@ -85,7 +85,6 @@ fn main() -> anyhow::Result<()> {
     let repo = Repository::open_ext(&opts.repo, git2::RepositoryOpenFlags::empty(), Some("/"))
         .with_context(|| format!("Opening repo {}", opts.repo))?;
 
-    let mut note_map = HashMap::new();
     for label in &opts.labels {
         // 1. Collect PRs
         let mut prs = vec![];
@@ -137,7 +136,8 @@ fn main() -> anyhow::Result<()> {
         println!("Found {} parent commits", parent_commits.len());
 
         // 3. Build map of notes
-        for pr in &prs {
+        let mut note_map = HashMap::new();
+        for (n, pr) in prs.iter().enumerate() {
             pr.for_each_commit(&repo, &parent_commits, |id, index, n_commits| {
                 note_map.entry(id).or_insert(vec![]).push(Note {
                     url_prefix: &label.url_prefix,
@@ -146,10 +146,27 @@ fn main() -> anyhow::Result<()> {
                     n_commits: n_commits,
                 })
             });
+
+            if n > 0 && n % 10_000 == 0 {
+                println!(
+                    "Labelling {} commits ({} / {} PRs)",
+                    note_map.len(),
+                    n,
+                    prs.len()
+                );
+                create_notes(&repo, note_map)?;
+                note_map = HashMap::new();
+            }
         }
-        println!("Labelling {} commits", note_map.len());
     }
 
+    Ok(())
+}
+
+fn create_notes(
+    repo: &Repository,
+    mut note_map: HashMap<git2::Oid, Vec<Note>>,
+) -> anyhow::Result<()> {
     // 4. Build note commit
     let mut note_tree = repo.treebuilder(None).expect("getting a treebuilder");
     for (id, notes) in &mut note_map {
