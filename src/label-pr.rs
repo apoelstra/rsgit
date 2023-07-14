@@ -147,11 +147,11 @@ fn main() -> anyhow::Result<()> {
                 })
             });
 
-            if n > 0 && n % 10_000 == 0 {
+            if n % 10_000 == 9_999 || n == prs.len() - 1 {
                 println!(
                     "Labelling {} commits ({} / {} PRs)",
                     note_map.len(),
-                    n,
+                    n + 1,
                     prs.len()
                 );
                 create_notes(&repo, note_map)?;
